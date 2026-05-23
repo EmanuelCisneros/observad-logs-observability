@@ -1,0 +1,95 @@
+# Observa — local development stack.
+#
+#   docker compose up --build
+#
+# Brings up ClickHouse, Redis, the observad backend, Prometheus and Grafana.
+# The frontend runs separately with `npm run dev` so hot-reload stays fast.
+
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.3-alpine
+    container_name: observa-clickhouse
+    ports:
+      - "8123:8123" # HTTP interface (handy for ad-hoc queries)
+      - "9000:9000" # native protocol — used by the backend
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      # Schema is applied on first boot via the init directory.
+      - ../backend/migrations/001_init.sql:/docker-entrypoint-initdb.d/001_init.sql:ro
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8123/ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
+  redis:
+    image: redis:7-alpine
+    container_name: observa-redis
+    ports:
+      - "6379:6379"
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  backend:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    container_name: observa-backend
+    ports:
+      - "8080:8080"
+    environment:
+      OBSERVA_ALLOW_MEMSTORE: "1"
+      OBSERVA_HTTP_ADDR: ":8080"
+      OBSERVA_LOG_LEVEL: "info"
+      OBSERVA_INGEST_API_KEY: "dev-local-key"
+      OBSERVA_CH_ADDR: "clickhouse:9000"
+      OBSERVA_CH_DB: "observa"
+      OBSERVA_REDIS_ADDR: "redis:6379"
+      OBSERVA_BATCH_SIZE: "10000"
+      OBSERVA_FLUSH_INTERVAL: "1s"
+      OBSERVA_WORKERS: "4"
+      OBSERVA_CORS_ORIGINS: "http://localhost:3000,*"
+      OBSERVA_INGEST_RATE_LIMIT: "1000"
+    depends_on:
+      - clickhouse
+      - redis
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    container_name: observa-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    depends_on:
+      - backend
+
+  grafana:
+    image: grafana/grafana:11.1.0
+    container_name: observa-grafana
+    ports:
+      - "3001:3000" # 3001 on the host so it does not clash with Next.js
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: "admin"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+
+volumes:
+  clickhouse-data:
+  redis-data:
+  grafana-data:
